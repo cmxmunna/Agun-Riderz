@@ -12,9 +12,9 @@ $error = '';
 $success = '';
 
 // Handle login form submission
-if ($_POST) {
-    $identifier = sanitizeInput($_POST['identifier']); // email or phone
-    $password = $_POST['password'];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['register'])) {
+    $identifier = sanitizeInput($_POST['identifier'] ?? ''); // email or phone
+    $password = $_POST['password'] ?? '';
     
     if (empty($identifier) || empty($password)) {
         $error = 'Please fill in all fields';
@@ -39,11 +39,11 @@ if ($_POST) {
 
 // Handle registration form submission
 if (isset($_POST['register'])) {
-    $name = sanitizeInput($_POST['name']);
-    $email = sanitizeInput($_POST['email']);
-    $phone = sanitizeInput($_POST['phone']);
-    $password = $_POST['password'];
-    $confirm_password = $_POST['confirm_password'];
+    $name = sanitizeInput($_POST['name'] ?? '');
+    $email = sanitizeInput($_POST['email'] ?? '');
+    $phone = sanitizeInput($_POST['phone'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $confirm_password = $_POST['confirm_password'] ?? '';
     
     if (empty($name) || empty($email) || empty($phone) || empty($password)) {
         $error = 'Please fill in all fields';
@@ -143,7 +143,10 @@ if (isset($_POST['register'])) {
                                         <label for="password" class="form-label">
                                             <i class="fas fa-lock me-2"></i>Password
                                         </label>
-                                        <input type="password" class="form-control" id="password" name="password" required>
+                                        <div class="input-group">
+                                            <input type="password" class="form-control" id="password" name="password" required>
+                                            <button type="button" class="btn btn-outline-secondary toggle-password" data-target="#password" aria-label="Show password" title="Show password"><i class="far fa-eye"></i></button>
+                                        </div>
                                     </div>
                                     
                                     <div class="d-grid">
@@ -198,16 +201,22 @@ if (isset($_POST['register'])) {
                                         <label for="reg_password" class="form-label">
                                             <i class="fas fa-lock me-2"></i>Password
                                         </label>
-                                        <input type="password" class="form-control" id="reg_password" name="password" 
-                                               minlength="6" required>
+                                        <div class="input-group">
+                                            <input type="password" class="form-control" id="reg_password" name="password" 
+                                                   minlength="6" required>
+                                            <button type="button" class="btn btn-outline-secondary toggle-password" data-target="#reg_password" aria-label="Show password" title="Show password"><i class="far fa-eye"></i></button>
+                                        </div>
                                     </div>
                                     
                                     <div class="mb-3">
                                         <label for="reg_confirm_password" class="form-label">
                                             <i class="fas fa-lock me-2"></i>Confirm Password
                                         </label>
-                                        <input type="password" class="form-control" id="reg_confirm_password" name="confirm_password" 
-                                               minlength="6" required>
+                                        <div class="input-group">
+                                            <input type="password" class="form-control" id="reg_confirm_password" name="confirm_password" 
+                                                   minlength="6" required>
+                                            <button type="button" class="btn btn-outline-secondary toggle-password" data-target="#reg_confirm_password" aria-label="Show password" title="Show password"><i class="far fa-eye"></i></button>
+                                        </div>
                                     </div>
                                     
                                     <div class="d-grid">
@@ -243,6 +252,26 @@ if (isset($_POST['register'])) {
     <script src="assets/js/script.js"></script>
     
     <!-- Facebook SDK -->
+    <script>
+        // Password toggle buttons (eye / eye-slash)
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.toggle-password').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    const input = document.querySelector(btn.getAttribute('data-target'));
+                    if (!input) return;
+                    const icon = btn.querySelector('i');
+                    const hidden = input.type === 'password';
+                    input.type = hidden ? 'text' : 'password';
+                    if (icon) {
+                        icon.classList.toggle('fa-eye', !hidden);
+                        icon.classList.toggle('fa-eye-slash', hidden);
+                    }
+                    btn.setAttribute('aria-label', hidden ? 'Hide password' : 'Show password');
+                    btn.title = hidden ? 'Hide password' : 'Show password';
+                });
+            });
+        });
+    </script>
     <script>
         window.fbAsyncInit = function() {
             FB.init({

@@ -148,20 +148,54 @@ function getUserTours($user_id) {
 function joinTour($tour_id, $user_id) {
     $pdo = getDBConnection();
     
-    // Check if already joined
-    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ?");
-    $stmt->execute([$tour_id, $user_id]);
+    // Check if tour exists and is active
+    $stmt = $pdo->prepare("SELECT id, status, max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
     
-    if ($stmt->fetch()) {
-        return false; // Already joined
+    if (!$tour || $tour['status'] !== 'active') {
+        return false; // Tour doesn't exist or is not active
     }
     
-    $stmt = $pdo->prepare("INSERT INTO tour_members (tour_id, user_id, status) VALUES (?, ?, 'confirmed')");
+    // Check if already joined or has pending request
+    $stmt = $pdo->prepare("SELECT id, status FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    $stmt->execute([$tour_id, $user_id]);
+    $existing = $stmt->fetch();
+    
+    if ($existing) {
+        if ($existing['status'] === 'confirmed') {
+            return false; // Already confirmed member
+        } elseif ($existing['status'] === 'pending') {
+            return false; // Already has pending request
+        }
+    }
+    
+    // Check if tour is full (only count confirmed members)
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount >= $tour['max_members']) {
+        return false; // Tour is full
+    }
+    
+    // Send join request (status = 'pending')
+    $stmt = $pdo->prepare("INSERT INTO tour_members (tour_id, user_id, status) VALUES (?, ?, 'pending')");
     return $stmt->execute([$tour_id, $user_id]);
 }
 
 function leaveTour($tour_id, $user_id) {
     $pdo = getDBConnection();
+    
+    // Check if user is actually a member of this tour
+    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    $stmt->execute([$tour_id, $user_id]);
+    
+    if (!$stmt->fetch()) {
+        return false; // User is not a member of this tour
+    }
+    
+    // Leave the tour
     $stmt = $pdo->prepare("DELETE FROM tour_members WHERE tour_id = ? AND user_id = ?");
     return $stmt->execute([$tour_id, $user_id]);
 }
@@ -202,6 +236,26 @@ function updateTour($tour_id, $data) {
 
 function deleteTour($tour_id) {
     $pdo = getDBConnection();
+    
+    // Check if tour exists
+    $stmt = $pdo->prepare("SELECT id, status FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return false; // Tour doesn't exist
+    }
+    
+    // Check if tour has confirmed members (optional: prevent deletion if tour has members)
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount > 0) {
+        return false; // Cannot delete tour with confirmed members
+    }
+    
+    // Delete the tour (tour_members and expenses will be deleted automatically due to CASCADE)
     $stmt = $pdo->prepare("DELETE FROM tours WHERE id = ?");
     return $stmt->execute([$tour_id]);
 }
@@ -489,5 +543,142 @@ function logout() {
     session_destroy();
     header('Location: login.php');
     exit();
+}
+
+// Tour validation helper function
+function canJoinTour($tour_id, $user_id) {
+    $pdo = getDBConnection();
+    
+    // Check if tour exists and is active
+    $stmt = $pdo->prepare("SELECT id, status, max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return ['can_join' => false, 'reason' => 'Tour not found'];
+    }
+    
+    if ($tour['status'] !== 'active') {
+        return ['can_join' => false, 'reason' => 'Tour is not active'];
+    }
+    
+    // Check if already joined or has pending request
+    $stmt = $pdo->prepare("SELECT id, status FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    $stmt->execute([$tour_id, $user_id]);
+    $existing = $stmt->fetch();
+    
+    if ($existing) {
+        if ($existing['status'] === 'confirmed') {
+            return ['can_join' => false, 'reason' => 'Already a confirmed member'];
+        } elseif ($existing['status'] === 'pending') {
+            return ['can_join' => false, 'reason' => 'Join request pending approval'];
+        }
+    }
+    
+    // Check if tour is full (only count confirmed members)
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount >= $tour['max_members']) {
+        return ['can_join' => false, 'reason' => 'Tour is full'];
+    }
+    
+    return ['can_join' => true, 'reason' => ''];
+}
+
+// Admin functions for managing join requests
+function approveJoinRequest($tour_id, $user_id, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if join request exists and is pending
+    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ? AND status = 'pending'");
+    $stmt->execute([$tour_id, $user_id]);
+    
+    if (!$stmt->fetch()) {
+        return false; // No pending request found
+    }
+    
+    // Check if tour is full
+    $stmt = $pdo->prepare("SELECT max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return false; // Tour not found
+    }
+    
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount >= $tour['max_members']) {
+        return false; // Tour is full
+    }
+    
+    // Approve the join request
+    $stmt = $pdo->prepare("UPDATE tour_members SET status = 'confirmed' WHERE tour_id = ? AND user_id = ?");
+    return $stmt->execute([$tour_id, $user_id]);
+}
+
+function rejectJoinRequest($tour_id, $user_id, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if join request exists and is pending
+    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ? AND status = 'pending'");
+    $stmt->execute([$tour_id, $user_id]);
+    
+    if (!$stmt->fetch()) {
+        return false; // No pending request found
+    }
+    
+    // Reject the join request (delete it)
+    $stmt = $pdo->prepare("DELETE FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    return $stmt->execute([$tour_id, $user_id]);
+}
+
+function getPendingJoinRequests($tour_id = null) {
+    $pdo = getDBConnection();
+    
+    if ($tour_id) {
+        $stmt = $pdo->prepare("
+            SELECT tm.*, u.name as user_name, u.email, u.phone, t.title as tour_title
+            FROM tour_members tm 
+            INNER JOIN users u ON tm.user_id = u.id 
+            INNER JOIN tours t ON tm.tour_id = t.id 
+            WHERE tm.status = 'pending' AND tm.tour_id = ?
+            ORDER BY tm.joined_at ASC
+        ");
+        $stmt->execute([$tour_id]);
+    } else {
+        $stmt = $pdo->query("
+            SELECT tm.*, u.name as user_name, u.email, u.phone, t.title as tour_title
+            FROM tour_members tm 
+            INNER JOIN users u ON tm.user_id = u.id 
+            INNER JOIN tours t ON tm.tour_id = t.id 
+            WHERE tm.status = 'pending'
+            ORDER BY tm.joined_at ASC
+        ");
+    }
+    
+    return $stmt->fetchAll();
 }
 ?> 
