@@ -246,7 +246,7 @@ function deleteTour($tour_id) {
         return false; // Tour doesn't exist
     }
     
-    // Check if tour has confirmed members (optional: prevent deletion if tour has members)
+    // Check if tour has confirmed members - only prevent deletion if there are confirmed members
     $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
     $stmt->execute([$tour_id]);
     $memberCount = $stmt->fetch()['count'];
@@ -255,7 +255,15 @@ function deleteTour($tour_id) {
         return false; // Cannot delete tour with confirmed members
     }
     
-    // Delete the tour (tour_members and expenses will be deleted automatically due to CASCADE)
+    // Delete all pending join requests first
+    $stmt = $pdo->prepare("DELETE FROM tour_members WHERE tour_id = ? AND status = 'pending'");
+    $stmt->execute([$tour_id]);
+    
+    // Delete all expenses for this tour
+    $stmt = $pdo->prepare("DELETE FROM expenses WHERE tour_id = ?");
+    $stmt->execute([$tour_id]);
+    
+    // Delete the tour
     $stmt = $pdo->prepare("DELETE FROM tours WHERE id = ?");
     return $stmt->execute([$tour_id]);
 }
