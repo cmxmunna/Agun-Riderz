@@ -13,7 +13,11 @@ if ($_POST) {
     if (isset($_POST['join_tour'])) {
         $tour_id = (int)$_POST['tour_id'];
         if (joinTour($tour_id, $user_id)) {
-            $success = 'Successfully joined the tour!';
+            if ($user_role == 'admin') {
+                $success = 'Successfully joined the tour!';
+            } else {
+                $success = 'Join request sent successfully! Waiting for admin approval.';
+            }
         } else {
             $error = 'Failed to join tour or already joined.';
         }
@@ -210,34 +214,41 @@ $user_tour_ids = array_column($user_tours, 'id');
                                 </a>
                                 
                                 <div class="btn-group">
-                                    <?php if (in_array($tour['id'], $user_tour_ids)): ?>
-                                        <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="tour_id" value="<?php echo $tour['id']; ?>">
-                                            <button type="submit" name="leave_tour" class="btn btn-outline-danger btn-sm" 
-                                                    onclick="return confirm('Are you sure you want to leave this tour?')">
-                                                <i class="fas fa-sign-out-alt me-1"></i>Leave
-                                            </button>
-                                        </form>
+                                    <?php if ($tour['status'] == 'active'): ?>
+                                        <?php if (in_array($tour['id'], $user_tour_ids)): ?>
+                                            <form method="POST" style="display: inline;">
+                                                <input type="hidden" name="tour_id" value="<?php echo $tour['id']; ?>">
+                                                <button type="submit" name="leave_tour" class="btn btn-outline-danger btn-sm" 
+                                                        onclick="return confirm('Are you sure you want to leave this tour?')">
+                                                    <i class="fas fa-sign-out-alt me-1"></i>Leave
+                                                </button>
+                                            </form>
+                                        <?php else: ?>
+                                            <form method="POST" style="display: inline;">
+                                                <input type="hidden" name="tour_id" value="<?php echo $tour['id']; ?>">
+                                                <button type="submit" name="join_tour" class="btn btn-outline-success btn-sm">
+                                                    <i class="fas fa-sign-in-alt me-1"></i><?php echo $user_role == 'admin' ? 'Join Directly' : 'Send Request'; ?>
+                                                </button>
+                                            </form>
+                                        <?php endif; ?>
+                                        
+                                        <?php if ($user_role == 'admin'): ?>
+                                            <a href="edit_tour.php?id=<?php echo $tour['id']; ?>" class="btn btn-outline-warning btn-sm">
+                                                <i class="fas fa-edit me-1"></i>Edit
+                                            </a>
+                                            <form method="POST" style="display: inline;">
+                                                <input type="hidden" name="tour_id" value="<?php echo $tour['id']; ?>">
+                                                <button type="submit" name="delete_tour" class="btn btn-outline-danger btn-sm" 
+                                                        onclick="return confirm('Are you sure you want to delete this tour? This action cannot be undone.')">
+                                                    <i class="fas fa-trash me-1"></i>Delete
+                                                </button>
+                                            </form>
+                                        <?php endif; ?>
                                     <?php else: ?>
-                                        <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="tour_id" value="<?php echo $tour['id']; ?>">
-                                            <button type="submit" name="join_tour" class="btn btn-outline-success btn-sm">
-                                                <i class="fas fa-sign-in-alt me-1"></i>Join
-                                            </button>
-                                        </form>
-                                    <?php endif; ?>
-                                    
-                                    <?php if ($user_role == 'admin'): ?>
-                                        <a href="edit_tour.php?id=<?php echo $tour['id']; ?>" class="btn btn-outline-warning btn-sm">
-                                            <i class="fas fa-edit me-1"></i>Edit
-                                        </a>
-                                        <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="tour_id" value="<?php echo $tour['id']; ?>">
-                                            <button type="submit" name="delete_tour" class="btn btn-outline-danger btn-sm" 
-                                                    onclick="return confirm('Are you sure you want to delete this tour? This action cannot be undone.')">
-                                                <i class="fas fa-trash me-1"></i>Delete
-                                            </button>
-                                        </form>
+                                        <span class="text-muted small">
+                                            <i class="fas fa-info-circle me-1"></i>
+                                            <?php echo ucfirst($tour['status']); ?> tour
+                                        </span>
                                     <?php endif; ?>
                                 </div>
                             </div>

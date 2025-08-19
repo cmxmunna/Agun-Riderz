@@ -587,6 +587,23 @@ function canJoinTour($tour_id, $user_id) {
     return ['can_join' => true, 'reason' => ''];
 }
 
+// Check if user can join directly (admin) or needs approval (member)
+function canJoinDirectly($tour_id, $user_id) {
+    $pdo = getDBConnection();
+    
+    // Get user role
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user) {
+        return false;
+    }
+    
+    // Admins can join directly, members need approval
+    return $user['role'] === 'admin';
+}
+
 // Admin functions for managing join requests
 function approveJoinRequest($tour_id, $user_id, $admin_id) {
     $pdo = getDBConnection();

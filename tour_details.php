@@ -34,9 +34,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $joinCheck = canJoinTour($tour_id, $user_id);
         if ($joinCheck['can_join']) {
             if (joinTour($tour_id, $user_id)) {
-                $success = 'Join request sent successfully! Waiting for admin approval.';
+                if ($user_role == 'admin') {
+                    $success = 'Successfully joined the tour!';
+                } else {
+                    $success = 'Join request sent successfully! Waiting for admin approval.';
+                }
             } else {
-                $error = 'Failed to send join request. Please try again.';
+                $error = 'Failed to join tour. Please try again.';
             }
         } else {
             $error = 'Cannot join tour: ' . $joinCheck['reason'];
@@ -171,7 +175,7 @@ foreach ($tour_members as $member) {
                         <i class="fas fa-route me-2"></i><?php echo htmlspecialchars($tour['title']); ?>
                     </h2>
                     <div>
-                        <?php if ($user_role == 'admin'): ?>
+                        <?php if ($user_role == 'admin' && ($tour['status'] == 'active' || $tour['status'] == 'completed')): ?>
                             <a href="edit_tour.php?id=<?php echo $tour_id; ?>" class="btn btn-warning me-2">
                                 <i class="fas fa-edit me-2"></i>Edit Tour
                             </a>
@@ -271,12 +275,41 @@ foreach ($tour_members as $member) {
 
                         <!-- Join/Leave Actions -->
                         <hr>
+                        <?php if ($tour['status'] == 'active'): ?>
+                            <?php if ($user_role == 'admin'): ?>
+                                <div class="alert alert-info mb-3">
+                                    <i class="fas fa-info-circle me-2"></i>
+                                    <strong>Admin Note:</strong> As an admin, you can join tours directly without needing approval.
+                                </div>
+                            <?php else: ?>
+                                <div class="alert alert-warning mb-3">
+                                    <i class="fas fa-clock me-2"></i>
+                                    <strong>Member Note:</strong> Your join request will be reviewed by an admin before approval.
+                                </div>
+                            <?php endif; ?>
+                        <?php elseif ($tour['status'] == 'cancelled'): ?>
+                            <div class="alert alert-secondary mb-3">
+                                <i class="fas fa-ban me-2"></i>
+                                <strong>Tour Status:</strong> This tour is cancelled. No new members can join and the tour cannot be modified.
+                            </div>
+                        <?php elseif ($tour['status'] == 'completed'): ?>
+                            <div class="alert alert-info mb-3">
+                                <i class="fas fa-check-circle me-2"></i>
+                                <strong>Tour Status:</strong> This tour is completed. No new members can join, but admins can still modify tour details.
+                            </div>
+                        <?php endif; ?>
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
                                 <?php if ($user_is_member): ?>
-                                    <span class="badge bg-success">
-                                        <i class="fas fa-check me-1"></i>Member (<?php echo ucfirst($user_member_status); ?>)
-                                    </span>
+                                    <?php if ($user_role == 'admin'): ?>
+                                        <span class="badge bg-primary">
+                                            <i class="fas fa-crown me-1"></i>Admin Member (Confirmed)
+                                        </span>
+                                    <?php else: ?>
+                                        <span class="badge bg-success">
+                                            <i class="fas fa-check me-1"></i>Member (<?php echo ucfirst($user_member_status); ?>)
+                                        </span>
+                                    <?php endif; ?>
                                 <?php else: ?>
                                     <span class="text-muted">Not a member</span>
                                 <?php endif; ?>
@@ -285,13 +318,21 @@ foreach ($tour_members as $member) {
                                 <?php 
                                 if (!$user_is_member && $tour['status'] == 'active') {
                                     $joinCheck = canJoinTour($tour_id, $user_id);
-                                    if ($joinCheck['can_join']) { ?>
-                                        <form method="POST" style="display: inline;">
-                                            <button type="submit" name="join_tour" class="btn btn-success">
-                                                <i class="fas fa-paper-plane me-2"></i>Send Join Request
-                                            </button>
-                                        </form>
-                                    <?php } else { ?>
+                                    if ($joinCheck['can_join']) { 
+                                        if ($user_role == 'admin') { ?>
+                                            <form method="POST" style="display: inline;">
+                                                <button type="submit" name="join_tour" class="btn btn-success">
+                                                    <i class="fas fa-plus me-2"></i>Join Tour Directly
+                                                </button>
+                                            </form>
+                                        <?php } else { ?>
+                                            <form method="POST" style="display: inline;">
+                                                <button type="submit" name="join_tour" class="btn btn-success">
+                                                    <i class="fas fa-paper-plane me-2"></i>Send Join Request
+                                                </button>
+                                            </form>
+                                        <?php }
+                                    } else { ?>
                                         <span class="text-muted"><?php echo $joinCheck['reason']; ?></span>
                                     <?php }
                                 } elseif ($user_is_member && $tour['status'] == 'active') { ?>
@@ -338,9 +379,15 @@ foreach ($tour_members as $member) {
                                                 <?php echo htmlspecialchars($member['name']); ?>
                                             </td>
                                             <td>
-                                                <span class="badge bg-<?php echo $member['status'] == 'confirmed' ? 'success' : ($member['status'] == 'pending' ? 'warning' : 'danger'); ?>">
-                                                    <?php echo ucfirst($member['status']); ?>
-                                                </span>
+                                                <?php if ($member['role'] == 'admin'): ?>
+                                                    <span class="badge bg-primary">
+                                                        <i class="fas fa-crown me-1"></i>Admin (Confirmed)
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span class="badge bg-<?php echo $member['status'] == 'confirmed' ? 'success' : ($member['status'] == 'pending' ? 'warning' : 'danger'); ?>">
+                                                        <?php echo ucfirst($member['status']); ?>
+                                                    </span>
+                                                <?php endif; ?>
                                             </td>
                                             <td>
                                                 <small class="text-muted">
@@ -533,9 +580,23 @@ foreach ($tour_members as $member) {
                     </div>
                     <div class="card-body">
                         <div class="d-grid gap-2">
-                            <a href="edit_tour.php?id=<?php echo $tour_id; ?>" class="btn btn-warning btn-sm">
-                                <i class="fas fa-edit me-2"></i>Edit Tour
-                            </a>
+                            <?php if ($tour['status'] == 'active' || $tour['status'] == 'completed'): ?>
+                                <a href="edit_tour.php?id=<?php echo $tour_id; ?>" class="btn btn-warning btn-sm">
+                                    <i class="fas fa-edit me-2"></i>Edit Tour
+                                </a>
+                                <form method="POST" style="display: inline;">
+                                    <button type="submit" name="delete_tour" class="btn btn-danger btn-sm w-100" 
+                                            onclick="return confirm('Are you sure you want to delete this tour? This action cannot be undone.')">
+                                        <i class="fas fa-trash me-2"></i>Delete Tour
+                                    </button>
+                                </form>
+                            <?php elseif ($tour['status'] == 'cancelled'): ?>
+                                <span class="text-muted small text-center">
+                                    <i class="fas fa-ban me-1"></i>
+                                    Cancelled tours cannot be modified
+                                </span>
+                            <?php endif; ?>
+                            
                             <?php 
                             $total_pending = count(getPendingJoinRequests());
                             if ($total_pending > 0): 
@@ -544,12 +605,6 @@ foreach ($tour_members as $member) {
                                 <i class="fas fa-clock me-2"></i>View All Pending (<?php echo $total_pending; ?>)
                             </a>
                             <?php endif; ?>
-                            <form method="POST" style="display: inline;">
-                                <button type="submit" name="delete_tour" class="btn btn-danger btn-sm w-100" 
-                                        onclick="return confirm('Are you sure you want to delete this tour? This action cannot be undone.')">
-                                    <i class="fas fa-trash me-2"></i>Delete Tour
-                                </button>
-                            </form>
                         </div>
                     </div>
                 </div>
