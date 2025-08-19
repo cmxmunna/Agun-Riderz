@@ -1,87 +1,168 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-requireLogin();
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
-$userId = $_SESSION['user_id'];
-$user = getUserById($userId);
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Update user function
+function updateUser($user_id, $data) {
+    $pdo = getDBConnection();
+    
+    $fields = [];
+    $values = [];
+    
+    foreach ($data as $key => $value) {
+        if ($key !== 'id') {
+            $fields[] = "$key = ?";
+            $values[] = $value;
+        }
+    }
+    
+    $values[] = $user_id;
+    
+    $sql = "UPDATE users SET " . implode(', ', $fields) . " WHERE id = ?";
+    $stmt = $pdo->prepare($sql);
+    
+    return $stmt->execute($values);
+}
+
+// Get user tours
+function getUserTours($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT t.*, tm.status as member_status, u.name as creator_name
+        FROM tours t 
+        INNER JOIN tour_members tm ON t.id = tm.tour_id
+        LEFT JOIN users u ON t.created_by = u.id 
+        WHERE tm.user_id = ?
+        ORDER BY t.start_date DESC
+    ");
+    $stmt->execute([$user_id]);
+    return $stmt->fetchAll();
+}
+
+// Get user expenses
+function getUserExpenses($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT e.*, t.title as tour_title
+        FROM expenses e 
+        LEFT JOIN tours t ON e.tour_id = t.id 
+        WHERE e.user_id = ?
+        ORDER BY e.date DESC
+    ");
+    $stmt->execute([$user_id]);
+    return $stmt->fetchAll();
+}
+
+// Get user total expenses
+function getUserTotalExpenses($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT SUM(amount) as total 
+        FROM expenses 
+        WHERE user_id = ? AND status = 'approved'
+    ");
+    $stmt->execute([$user_id]);
+    $result = $stmt->fetch();
+    return $result['total'] ?? 0;
+}
+
+// Sanitize input function
+function sanitizeInput($input) {
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+// Format date function
+function formatDate($date) {
+    return date('M d, Y', strtotime($date));
+}
+
+// Format currency function
+function formatCurrency($amount) {
+    return '৳' . number_format($amount, 2);
+}
+
+// Controller logic starts here
+$user_id = $_SESSION['user_id'];
+$user = getUserById($user_id);
+$user_role = $user['role'];
 
 $error = '';
 $success = '';
 
-// Handle profile updates
+// Handle profile update
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Update basic profile info
     if (isset($_POST['update_profile'])) {
         $name = sanitizeInput($_POST['name'] ?? '');
         $email = sanitizeInput($_POST['email'] ?? '');
         $phone = sanitizeInput($_POST['phone'] ?? '');
-
-        if (empty($name) || empty($email) || empty($phone)) {
-            $error = 'Please fill in all fields';
-        } elseif (!validateEmail($email)) {
-            $error = 'Please enter a valid email address';
-        } elseif (!validatePhone($phone)) {
-            $error = 'Please enter a valid phone number';
+        
+        if (empty($name) || empty($email)) {
+            $error = 'Name and email are required fields.';
         } else {
-            // Check for unique email if changed
-            if (strtolower($email) !== strtolower($user['email'])) {
-                $existingByEmail = getUserByEmail($email);
-                if ($existingByEmail && (int)$existingByEmail['id'] !== (int)$userId) {
-                    $error = 'Email is already in use by another account';
-                }
-            }
-
-            // Check for unique phone if changed
-            if (!$error && $phone !== $user['phone']) {
-                $existingByPhone = getUserByPhone($phone);
-                if ($existingByPhone && (int)$existingByPhone['id'] !== (int)$userId) {
-                    $error = 'Phone number is already in use by another account';
-                }
-            }
-
-            if (!$error) {
-                $updateData = [
-                    'name' => $name,
-                    'email' => $email,
-                    'phone' => $phone,
-                ];
-                if (updateUser($userId, $updateData)) {
-                    $success = 'Profile updated successfully';
-                    $user = getUserById($userId); // refresh data
-                } else {
-                    $error = 'Failed to update profile. Please try again.';
-                }
+            $user_data = [
+                'name' => $name,
+                'email' => $email,
+                'phone' => $phone
+            ];
+            
+            if (updateUser($user_id, $user_data)) {
+                $success = 'Profile updated successfully!';
+                // Refresh user data
+                $user = getUserById($user_id);
+            } else {
+                $error = 'Failed to update profile. Please try again.';
             }
         }
-    }
-
-    // Change password
-    if (isset($_POST['change_password']) && !$error) {
-        $currentPassword = $_POST['current_password'] ?? '';
-        $newPassword = $_POST['new_password'] ?? '';
-        $confirmPassword = $_POST['confirm_password'] ?? '';
-
-        if (empty($currentPassword) || empty($newPassword) || empty($confirmPassword)) {
-            $error = 'Please fill in all password fields';
-        } elseif (!password_verify($currentPassword, $user['password'] ?? '')) {
-            $error = 'Current password is incorrect';
-        } elseif (strlen($newPassword) < 6) {
-            $error = 'New password must be at least 6 characters long';
-        } elseif ($newPassword !== $confirmPassword) {
-            $error = 'New passwords do not match';
+    } elseif (isset($_POST['change_password'])) {
+        $current_password = $_POST['current_password'] ?? '';
+        $new_password = $_POST['new_password'] ?? '';
+        $confirm_password = $_POST['confirm_password'] ?? '';
+        
+        if (empty($current_password) || empty($new_password) || empty($confirm_password)) {
+            $error = 'All password fields are required.';
+        } elseif ($new_password !== $confirm_password) {
+            $error = 'New password and confirmation do not match.';
+        } elseif (strlen($new_password) < 6) {
+            $error = 'New password must be at least 6 characters long.';
+        } elseif (!password_verify($current_password, $user['password'])) {
+            $error = 'Current password is incorrect.';
         } else {
-            $hashed = password_hash($newPassword, PASSWORD_DEFAULT);
-            if (updateUser($userId, ['password' => $hashed])) {
-                $success = 'Password updated successfully';
-                $user = getUserById($userId);
+            $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
+            
+            if (updateUser($user_id, ['password' => $hashed_password])) {
+                $success = 'Password changed successfully!';
             } else {
-                $error = 'Failed to update password. Please try again.';
+                $error = 'Failed to change password. Please try again.';
             }
         }
     }
 }
+
+// Get user's tours
+$user_tours = getUserTours($user_id);
+
+// Get user's expenses
+$user_expenses = getUserExpenses($user_id);
+
+// Get user's total expenses
+$total_expenses = getUserTotalExpenses($user_id);
 ?>
 
 <!DOCTYPE html>

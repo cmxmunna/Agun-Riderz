@@ -1,98 +1,266 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-requireLogin();
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Get all tours
+function getAllTours() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->query("
+        SELECT t.*, u.name as creator_name,
+               (SELECT COUNT(*) FROM tour_members WHERE tour_id = t.id AND status = 'confirmed') as member_count
+        FROM tours t 
+        LEFT JOIN users u ON t.created_by = u.id 
+        ORDER BY t.start_date DESC
+    ");
+    return $stmt->fetchAll();
+}
+
+// Get all expenses
+function getAllExpenses($tour_id = null) {
+    $pdo = getDBConnection();
+    
+    if ($tour_id) {
+        $stmt = $pdo->prepare("
+            SELECT e.*, u.name as user_name, t.title as tour_title
+            FROM expenses e 
+            LEFT JOIN users u ON e.user_id = u.id 
+            LEFT JOIN tours t ON e.tour_id = t.id 
+            WHERE e.tour_id = ?
+            ORDER BY e.date DESC
+        ");
+        $stmt->execute([$tour_id]);
+    } else {
+        $stmt = $pdo->query("
+            SELECT e.*, u.name as user_name, t.title as tour_title
+            FROM expenses e 
+            LEFT JOIN users u ON e.user_id = u.id 
+            LEFT JOIN tours t ON e.tour_id = t.id 
+            ORDER BY e.date DESC
+        ");
+    }
+    
+    return $stmt->fetchAll();
+}
+
+// Get user expenses
+function getUserExpenses($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT e.*, t.title as tour_title
+        FROM expenses e 
+        LEFT JOIN tours t ON e.tour_id = t.id 
+        WHERE e.user_id = ?
+        ORDER BY e.date DESC
+    ");
+    $stmt->execute([$user_id]);
+    return $stmt->fetchAll();
+}
+
+// Create expense function
+function createExpense($data) {
+    $pdo = getDBConnection();
+    
+    $stmt = $pdo->prepare("
+        INSERT INTO expenses (tour_id, user_id, category, description, amount, date, receipt_image) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ");
+    
+    return $stmt->execute([
+        $data['tour_id'],
+        $data['user_id'],
+        $data['category'],
+        $data['description'],
+        $data['amount'],
+        $data['date'],
+        $data['receipt_image'] ?? null
+    ]);
+}
+
+// Update expense function
+function updateExpense($expense_id, $data) {
+    $pdo = getDBConnection();
+    
+    $fields = [];
+    $values = [];
+    
+    foreach ($data as $key => $value) {
+        if ($key !== 'id') {
+            $fields[] = "$key = ?";
+            $values[] = $value;
+        }
+    }
+    
+    $values[] = $expense_id;
+    
+    $sql = "UPDATE expenses SET " . implode(', ', $fields) . " WHERE id = ?";
+    $stmt = $pdo->prepare($sql);
+    
+    return $stmt->execute($values);
+}
+
+// Delete expense function
+function deleteExpense($expense_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("DELETE FROM expenses WHERE id = ?");
+    return $stmt->execute([$expense_id]);
+}
+
+// Approve expense function
+function approveExpense($expense_id, $approved_by) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        UPDATE expenses 
+        SET status = 'approved', approved_by = ? 
+        WHERE id = ?
+    ");
+    return $stmt->execute([$approved_by, $expense_id]);
+}
+
+// Reject expense function
+function rejectExpense($expense_id, $approved_by) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        UPDATE expenses 
+        SET status = 'rejected', approved_by = ? 
+        WHERE id = ?
+    ");
+    return $stmt->execute([$approved_by, $expense_id]);
+}
+
+// Sanitize input function
+function sanitizeInput($input) {
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+// Format currency function
+function formatCurrency($amount) {
+    return '৳' . number_format($amount, 2);
+}
+
+// Format date function
+function formatDate($date) {
+    return date('M d, Y', strtotime($date));
+}
+
+// Controller logic starts here
 $user_id = $_SESSION['user_id'];
 $user = getUserById($user_id);
 $user_role = $user['role'];
+
+$error = '';
+$success = '';
 
 // Get tour filter
 $tour_filter = isset($_GET['tour_id']) ? (int)$_GET['tour_id'] : null;
 
 // Handle expense actions
-if ($_POST) {
-    if (isset($_POST['add_expense'])) {
-        $expense_data = [
-            'tour_id' => !empty($_POST['tour_id']) ? (int)$_POST['tour_id'] : null,
-            'user_id' => $user_id,
-            'category' => sanitizeInput($_POST['category']),
-            'description' => sanitizeInput($_POST['description']),
-            'amount' => (float)$_POST['amount'],
-            'date' => $_POST['date']
-        ];
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['create_expense'])) {
+        // Handle expense creation
+        $tour_id = (int)($_POST['tour_id'] ?? 0);
+        $category = sanitizeInput($_POST['category'] ?? '');
+        $description = sanitizeInput($_POST['description'] ?? '');
+        $amount = (float)($_POST['amount'] ?? 0);
+        $date = $_POST['date'] ?? date('Y-m-d');
         
-        // Handle file upload
-        if (isset($_FILES['receipt']) && $_FILES['receipt']['error'] == 0) {
-            $uploaded_file = uploadImage($_FILES['receipt'], 'uploads/receipts/');
-            if ($uploaded_file) {
-                $expense_data['receipt_image'] = $uploaded_file;
+        if (empty($category) || empty($description) || $amount <= 0) {
+            $error = 'Please fill in all required fields with valid values.';
+        } else {
+            $expense_data = [
+                'tour_id' => $tour_id,
+                'user_id' => $user_id,
+                'category' => $category,
+                'description' => $description,
+                'amount' => $amount,
+                'date' => $date
+            ];
+            
+            if (createExpense($expense_data)) {
+                $success = 'Expense added successfully!';
+            } else {
+                $error = 'Failed to add expense. Please try again.';
             }
         }
+    } elseif (isset($_POST['update_expense'])) {
+        // Handle expense update
+        $expense_id = (int)($_POST['expense_id'] ?? 0);
+        $category = sanitizeInput($_POST['category'] ?? '');
+        $description = sanitizeInput($_POST['description'] ?? '');
+        $amount = (float)($_POST['amount'] ?? 0);
+        $date = $_POST['date'] ?? date('Y-m-d');
         
-        if (createExpense($expense_data)) {
-            $success = 'Expense added successfully!';
+        if (empty($category) || empty($description) || $amount <= 0) {
+            $error = 'Please fill in all required fields with valid values.';
         } else {
-            $error = 'Failed to add expense.';
+            $expense_data = [
+                'category' => $category,
+                'description' => $description,
+                'amount' => $amount,
+                'date' => $date
+            ];
+            
+            if (updateExpense($expense_id, $expense_data)) {
+                $success = 'Expense updated successfully!';
+            } else {
+                $error = 'Failed to update expense. Please try again.';
+            }
+        }
+    } elseif (isset($_POST['delete_expense'])) {
+        // Handle expense deletion
+        $expense_id = (int)($_POST['expense_id'] ?? 0);
+        
+        if (deleteExpense($expense_id)) {
+            $success = 'Expense deleted successfully!';
+        } else {
+            $error = 'Failed to delete expense. Please try again.';
         }
     } elseif (isset($_POST['approve_expense']) && $user_role == 'admin') {
-        $expense_id = (int)$_POST['expense_id'];
+        // Handle expense approval
+        $expense_id = (int)($_POST['expense_id'] ?? 0);
+        
         if (approveExpense($expense_id, $user_id)) {
             $success = 'Expense approved successfully!';
         } else {
-            $error = 'Failed to approve expense.';
+            $error = 'Failed to approve expense. Please try again.';
         }
     } elseif (isset($_POST['reject_expense']) && $user_role == 'admin') {
-        $expense_id = (int)$_POST['expense_id'];
+        // Handle expense rejection
+        $expense_id = (int)($_POST['expense_id'] ?? 0);
+        
         if (rejectExpense($expense_id, $user_id)) {
             $success = 'Expense rejected successfully!';
         } else {
-            $error = 'Failed to reject expense.';
-        }
-    } elseif (isset($_POST['delete_expense'])) {
-        $expense_id = (int)$_POST['expense_id'];
-        $expense = getExpenseById($expense_id);
-        
-        // Only allow deletion if user owns the expense or is admin
-        if ($expense && ($expense['user_id'] == $user_id || $user_role == 'admin')) {
-            if (deleteExpense($expense_id)) {
-                $success = 'Expense deleted successfully!';
-            } else {
-                $error = 'Failed to delete expense.';
-            }
-        } else {
-            $error = 'You are not authorized to delete this expense.';
+            $error = 'Failed to reject expense. Please try again.';
         }
     }
 }
 
-// Get expenses based on filters
-if ($tour_filter) {
+// Get expenses based on user role and filters
+if ($user_role == 'admin') {
     $expenses = getAllExpenses($tour_filter);
-    $tour = getTourById($tour_filter);
 } else {
-    $expenses = getAllExpenses();
-    $tour = null;
+    $expenses = getUserExpenses($user_id);
 }
 
-// Get user's tours for the add expense form
-$user_tours = getUserTours($user_id);
-$all_tours = getAllTours(); // For admin to see all tours
-
-// Calculate totals
-$total_expenses = 0;
-$approved_expenses = 0;
-$pending_expenses = 0;
-
-foreach ($expenses as $expense) {
-    $total_expenses += $expense['amount'];
-    if ($expense['status'] == 'approved') {
-        $approved_expenses += $expense['amount'];
-    } elseif ($expense['status'] == 'pending') {
-        $pending_expenses += $expense['amount'];
-    }
-}
+// Get all tours for filter dropdown
+$tours = getAllTours();
 ?>
 
 <!DOCTYPE html>
@@ -158,8 +326,8 @@ foreach ($expenses as $expense) {
                 <div class="d-flex justify-content-between align-items-center">
                     <h2>
                         <i class="fas fa-money-bill-wave me-2"></i>Expenses
-                        <?php if ($tour): ?>
-                            - <?php echo htmlspecialchars($tour['title']); ?>
+                        <?php if ($tour_filter): ?>
+                            - <?php echo htmlspecialchars($tours[$tour_filter - 1]['title']); ?>
                         <?php endif; ?>
                     </h2>
                     <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addExpenseModal">
@@ -234,7 +402,7 @@ foreach ($expenses as $expense) {
                                 <label for="tour_filter" class="form-label">Filter by Tour</label>
                                 <select class="form-select" id="tour_filter" name="tour_id" onchange="this.form.submit()">
                                     <option value="">All Tours</option>
-                                    <?php foreach ($all_tours as $t): ?>
+                                    <?php foreach ($tours as $t): ?>
                                         <option value="<?php echo $t['id']; ?>" <?php echo $tour_filter == $t['id'] ? 'selected' : ''; ?>>
                                             <?php echo htmlspecialchars($t['title']); ?>
                                         </option>
@@ -383,15 +551,15 @@ foreach ($expenses as $expense) {
                 </div>
                 <form method="POST" enctype="multipart/form-data">
                     <div class="modal-body">
-                        <input type="hidden" name="add_expense" value="1">
+                        <input type="hidden" name="create_expense" value="1">
                         
                         <div class="mb-3">
                             <label for="tour_id" class="form-label">Tour (Optional)</label>
                             <select class="form-select" id="tour_id" name="tour_id">
                                 <option value="">General Expense</option>
-                                <?php foreach ($user_tours as $user_tour): ?>
-                                    <option value="<?php echo $user_tour['id']; ?>" <?php echo $tour_filter == $user_tour['id'] ? 'selected' : ''; ?>>
-                                        <?php echo htmlspecialchars($user_tour['title']); ?>
+                                <?php foreach ($tours as $tour): ?>
+                                    <option value="<?php echo $tour['id']; ?>" <?php echo $tour_filter == $tour['id'] ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars($tour['title']); ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>

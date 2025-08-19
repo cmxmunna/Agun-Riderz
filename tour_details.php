@@ -1,9 +1,535 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-requireLogin();
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Get tour by ID
+function getTourById($tour_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT t.*, u.name as creator_name, 
+               (SELECT COUNT(*) FROM tour_members WHERE tour_id = t.id AND status = 'confirmed') as member_count
+        FROM tours t 
+        LEFT JOIN users u ON t.created_by = u.id 
+        WHERE t.id = ?
+    ");
+    $stmt->execute([$tour_id]);
+    return $stmt->fetch();
+}
+
+// Get tour members
+function getTourMembers($tour_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT u.*, tm.status, tm.joined_at, u.role
+        FROM tour_members tm 
+        INNER JOIN users u ON tm.user_id = u.id 
+        WHERE tm.tour_id = ?
+        ORDER BY tm.joined_at ASC
+    ");
+    $stmt->execute([$tour_id]);
+    return $stmt->fetchAll();
+}
+
+// Get all expenses for a tour
+function getAllExpenses($tour_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT e.*, u.name as user_name, t.title as tour_title
+        FROM expenses e 
+        LEFT JOIN users u ON e.user_id = u.id 
+        LEFT JOIN tours t ON e.tour_id = t.id 
+        WHERE e.tour_id = ?
+        ORDER BY e.date DESC
+    ");
+    $stmt->execute([$tour_id]);
+    return $stmt->fetchAll();
+}
+
+// Check if user can join tour
+function canJoinTour($tour_id, $user_id) {
+    $pdo = getDBConnection();
+    
+    // Check if tour exists and is active
+    $stmt = $pdo->prepare("SELECT id, status, max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return ['can_join' => false, 'reason' => 'Tour not found'];
+    }
+    
+    if ($tour['status'] !== 'active') {
+        return ['can_join' => false, 'reason' => 'Tour is not active'];
+    }
+    
+    // Check if already joined or has pending request
+    $stmt = $pdo->prepare("SELECT id, status FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    $stmt->execute([$tour_id, $user_id]);
+    $existing = $stmt->fetch();
+    
+    if ($existing) {
+        if ($existing['status'] === 'confirmed') {
+            return ['can_join' => false, 'reason' => 'Already a confirmed member'];
+        } elseif ($existing['status'] === 'pending') {
+            return ['can_join' => false, 'reason' => 'Join request pending approval'];
+        }
+    }
+    
+    // Check if tour is full (only count confirmed members)
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount >= $tour['max_members']) {
+        return ['can_join' => false, 'reason' => 'Tour is full'];
+    }
+    
+    return ['can_join' => true, 'reason' => ''];
+}
+
+// Join tour function
+function joinTour($tour_id, $user_id) {
+    $pdo = getDBConnection();
+    
+    // Check if tour exists and is active
+    $stmt = $pdo->prepare("SELECT id, status, max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour || $tour['status'] !== 'active') {
+        return false; // Tour doesn't exist or is not active
+    }
+    
+    // Check if already joined or has pending request
+    $stmt = $pdo->prepare("SELECT id, status FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    $stmt->execute([$tour_id, $user_id]);
+    $existing = $stmt->fetch();
+    
+    if ($existing) {
+        if ($existing['status'] === 'confirmed') {
+            return false; // Already confirmed member
+        } elseif ($existing['status'] === 'pending') {
+            return false; // Already has pending request
+        }
+    }
+    
+    // Check if tour is full (only count confirmed members)
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount >= $tour['max_members']) {
+        return false; // Tour is full
+    }
+    
+    // Check if user is admin (can join directly) or member (needs approval)
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user) {
+        return false;
+    }
+    
+    // Set status based on user role
+    $status = ($user['role'] === 'admin') ? 'confirmed' : 'pending';
+    
+    // Insert tour membership
+    $stmt = $pdo->prepare("INSERT INTO tour_members (tour_id, user_id, status, joined_at) VALUES (?, ?, ?, NOW())");
+    return $stmt->execute([$tour_id, $user_id, $status]);
+}
+
+// Leave tour function
+function leaveTour($tour_id, $user_id) {
+    $pdo = getDBConnection();
+    
+    // Check if user is actually a member of this tour
+    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    $stmt->execute([$tour_id, $user_id]);
+    
+    if (!$stmt->fetch()) {
+        return false; // User is not a member of this tour
+    }
+    
+    // Leave the tour
+    $stmt = $pdo->prepare("DELETE FROM tour_members WHERE tour_id = ? AND user_id = ?");
+    return $stmt->execute([$tour_id, $user_id]);
+}
+
+// Approve join request
+function approveJoinRequest($tour_id, $user_id, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if join request exists and is pending
+    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ? AND status = 'pending'");
+    $stmt->execute([$tour_id, $user_id]);
+    
+    if (!$stmt->fetch()) {
+        return false; // No pending request found
+    }
+    
+    // Check if tour is full
+    $stmt = $pdo->prepare("SELECT max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return false; // Tour not found
+    }
+    
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount >= $tour['max_members']) {
+        return false; // Tour is full
+    }
+    
+    // Approve the join request
+    $stmt = $pdo->prepare("UPDATE tour_members SET status = 'confirmed' WHERE tour_id = ? AND user_id = ?");
+    return $stmt->execute([$tour_id, $user_id]);
+}
+
+// Reject join request
+function rejectJoinRequest($tour_id, $user_id, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if join request exists and is pending
+    $stmt = $pdo->prepare("SELECT id FROM tour_members WHERE tour_id = ? AND user_id = ? AND status = 'pending'");
+    $stmt->execute([$tour_id, $user_id]);
+    
+    if (!$stmt->fetch()) {
+        return false; // No pending request found
+    }
+    
+    // Reject the join request (update status to rejected instead of deleting)
+    $stmt = $pdo->prepare("UPDATE tour_members SET status = 'rejected', rejected_at = NOW() WHERE tour_id = ? AND user_id = ?");
+    return $stmt->execute([$tour_id, $user_id]);
+}
+
+// Get pending join requests
+function getPendingJoinRequests($tour_id = null) {
+    $pdo = getDBConnection();
+    
+    if ($tour_id) {
+        $stmt = $pdo->prepare("
+            SELECT tm.*, u.name as user_name, u.email, u.phone, t.title as tour_title
+            FROM tour_members tm 
+            INNER JOIN users u ON tm.user_id = u.id 
+            INNER JOIN tours t ON tm.tour_id = t.id 
+            WHERE tm.status = 'pending' AND tm.tour_id = ?
+            ORDER BY tm.joined_at ASC
+        ");
+        $stmt->execute([$tour_id]);
+    } else {
+        $stmt = $pdo->query("
+            SELECT tm.*, u.name as user_name, u.email, u.phone, t.title as tour_title
+            FROM tour_members tm 
+            INNER JOIN users u ON tm.user_id = u.id 
+            INNER JOIN tours t ON tm.tour_id = t.id 
+            WHERE tm.status = 'pending'
+            ORDER BY tm.joined_at ASC
+        ");
+    }
+    
+    return $stmt->fetchAll();
+}
+
+// Get rejected join requests
+function getRejectedJoinRequests($tour_id = null) {
+    $pdo = getDBConnection();
+    
+    if ($tour_id) {
+        $stmt = $pdo->prepare("
+            SELECT tm.*, u.name as user_name, u.email, u.phone, t.title as tour_title, tm.rejected_at
+            FROM tour_members tm 
+            INNER JOIN users u ON tm.user_id = u.id 
+            INNER JOIN tours t ON tm.tour_id = t.id 
+            WHERE tm.status = 'rejected' AND tm.tour_id = ?
+            ORDER BY tm.rejected_at DESC
+        ");
+        $stmt->execute([$tour_id]);
+    } else {
+        $stmt = $pdo->query("
+            SELECT tm.*, u.name as user_name, u.email, u.phone, t.title as tour_title, tm.rejected_at
+            FROM tour_members tm 
+            INNER JOIN users u ON tm.user_id = u.id 
+            INNER JOIN tours t ON tm.tour_id = t.id 
+            WHERE tm.status = 'rejected'
+            ORDER BY tm.rejected_at DESC
+        ");
+    }
+    
+    return $stmt->fetchAll();
+}
+
+// Delete tour function
+function deleteTour($tour_id) {
+    $pdo = getDBConnection();
+    
+    // Check if tour exists
+    $stmt = $pdo->prepare("SELECT id, status FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return false; // Tour doesn't exist
+    }
+    
+    // Check if tour has confirmed members - only prevent deletion if there are confirmed members
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $memberCount = $stmt->fetch()['count'];
+    
+    if ($memberCount > 0) {
+        return false; // Cannot delete tour with confirmed members
+    }
+    
+    // Delete all pending join requests first
+    $stmt = $pdo->prepare("DELETE FROM tour_members WHERE tour_id = ? AND status = 'pending'");
+    $stmt->execute([$tour_id]);
+    
+    // Delete all expenses for this tour
+    $stmt = $pdo->prepare("DELETE FROM expenses WHERE tour_id = ?");
+    $stmt->execute([$tour_id]);
+    
+    // Delete the tour
+    $stmt = $pdo->prepare("DELETE FROM tours WHERE id = ?");
+    return $stmt->execute([$tour_id]);
+}
+
+// Format date utility function
+function formatDate($date) {
+    return date('M d, Y', strtotime($date));
+}
+
+// Update tour status function
+function updateTourStatus($tour_id, $new_status, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if tour exists
+    $stmt = $pdo->prepare("SELECT id FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    if (!$stmt->fetch()) {
+        return false; // Tour doesn't exist
+    }
+    
+    // Update tour status
+    $stmt = $pdo->prepare("UPDATE tours SET status = ?, updated_at = NOW() WHERE id = ?");
+    return $stmt->execute([$new_status, $tour_id]);
+}
+
+// Update tour details function
+function updateTourDetails($tour_id, $title, $description, $destination, $start_date, $end_date, $max_members, $budget, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if tour exists
+    $stmt = $pdo->prepare("SELECT id FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    if (!$stmt->fetch()) {
+        return false; // Tour doesn't exist
+    }
+    
+    // Update tour details
+    $stmt = $pdo->prepare("
+        UPDATE tours 
+        SET title = ?, description = ?, destination = ?, start_date = ?, end_date = ?, 
+            max_members = ?, budget = ?, updated_at = NOW() 
+        WHERE id = ?
+    ");
+    return $stmt->execute([$title, $description, $destination, $start_date, $end_date, $max_members, $budget, $tour_id]);
+}
+
+// Get tour statistics function
+function getTourStatistics($tour_id) {
+    $pdo = getDBConnection();
+    
+    // Get member counts by status
+    $stmt = $pdo->prepare("
+        SELECT 
+            status,
+            COUNT(*) as count
+        FROM tour_members 
+        WHERE tour_id = ? 
+        GROUP BY status
+    ");
+    $stmt->execute([$tour_id]);
+    $member_stats = $stmt->fetchAll();
+    
+    // Get expense statistics
+    $stmt = $pdo->prepare("
+        SELECT 
+            status,
+            COUNT(*) as count,
+            COALESCE(SUM(amount), 0) as total_amount
+        FROM expenses 
+        WHERE tour_id = ? 
+        GROUP BY status
+    ");
+    $stmt->execute([$tour_id]);
+    $expense_stats = $stmt->fetchAll();
+    
+    return [
+        'members' => $member_stats,
+        'expenses' => $expense_stats
+    ];
+}
+
+// Cancel tour function (soft delete - update status)
+function cancelTour($tour_id, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if tour exists and is not already cancelled
+    $stmt = $pdo->prepare("SELECT id, status FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour || $tour['status'] === 'cancelled') {
+        return false; // Tour doesn't exist or already cancelled
+    }
+    
+    // Update tour status to cancelled
+    $stmt = $pdo->prepare("UPDATE tours SET status = 'cancelled', updated_at = NOW() WHERE id = ?");
+    return $stmt->execute([$tour_id]);
+}
+
+// Bulk approve join requests function
+function bulkApproveJoinRequests($tour_id, $user_ids, $admin_id) {
+    $pdo = getDBConnection();
+    
+    // Check if admin
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $user = $stmt->fetch();
+    
+    if (!$user || $user['role'] !== 'admin') {
+        return false; // Not an admin
+    }
+    
+    // Check if tour exists and has capacity
+    $stmt = $pdo->prepare("SELECT max_members FROM tours WHERE id = ?");
+    $stmt->execute([$tour_id]);
+    $tour = $stmt->fetch();
+    
+    if (!$tour) {
+        return false; // Tour doesn't exist
+    }
+    
+    // Get current confirmed member count
+    $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM tour_members WHERE tour_id = ? AND status = 'confirmed'");
+    $stmt->execute([$tour_id]);
+    $current_count = $stmt->fetch()['count'];
+    
+    // Check if adding these users would exceed capacity
+    if (($current_count + count($user_ids)) > $tour['max_members']) {
+        return false; // Would exceed tour capacity
+    }
+    
+    try {
+        $pdo->beginTransaction();
+        
+        // Update all pending requests to confirmed
+        $placeholders = str_repeat('?,', count($user_ids) - 1) . '?';
+        $stmt = $pdo->prepare("
+            UPDATE tour_members 
+            SET status = 'confirmed', approved_at = NOW() 
+            WHERE tour_id = ? AND user_id IN ($placeholders) AND status = 'pending'
+        ");
+        
+        $params = array_merge([$tour_id], $user_ids);
+        $stmt->execute($params);
+        
+        $pdo->commit();
+        return true;
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        return false;
+    }
+}
+
+// Get tour member count by status
+function getTourMemberCountByStatus($tour_id) {
+    $pdo = getDBConnection();
+    
+    $stmt = $pdo->prepare("
+        SELECT status, COUNT(*) as count
+        FROM tour_members 
+        WHERE tour_id = ? 
+        GROUP BY status
+    ");
+    $stmt->execute([$tour_id]);
+    
+    $result = [];
+    while ($row = $stmt->fetch()) {
+        $result[$row['status']] = $row['count'];
+    }
+    
+    return $result;
+}
+
+// Controller logic starts here
 $user_id = $_SESSION['user_id'];
 $user = getUserById($user_id);
 $user_role = $user['role'];
@@ -37,7 +563,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($user_role == 'admin') {
                     $success = 'Successfully joined the tour!';
                 } else {
-                    $success = 'Join request sent successfully! Waiting for admin approval.';
+                $success = 'Join request sent successfully! Waiting for admin approval.';
                 }
             } else {
                 $error = 'Failed to join tour. Please try again.';
@@ -71,6 +597,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit();
         } else {
             $error = 'Failed to delete tour. The tour may have confirmed members or does not exist.';
+        }
+    } elseif (isset($_POST['cancel_tour']) && $user_role == 'admin') {
+        if (cancelTour($tour_id, $user_id)) {
+            $success = 'Tour cancelled successfully!';
+        } else {
+            $error = 'Failed to cancel tour.';
+        }
+    } elseif (isset($_POST['update_tour_status']) && $user_role == 'admin') {
+        $new_status = $_POST['new_status'];
+        if (in_array($new_status, ['active', 'completed', 'cancelled'])) {
+            if (updateTourStatus($tour_id, $new_status, $user_id)) {
+                $success = 'Tour status updated successfully!';
+            } else {
+                $error = 'Failed to update tour status.';
+            }
+        } else {
+            $error = 'Invalid tour status.';
+        }
+    } elseif (isset($_POST['bulk_approve_requests']) && $user_role == 'admin') {
+        $user_ids = $_POST['user_ids'] ?? [];
+        if (!empty($user_ids) && is_array($user_ids)) {
+            if (bulkApproveJoinRequests($tour_id, $user_ids, $user_id)) {
+                $success = 'Multiple join requests approved successfully!';
+            } else {
+                $error = 'Failed to approve join requests. Tour may be full or requests not found.';
+            }
+        } else {
+            $error = 'No users selected for approval.';
         }
     }
     
@@ -306,9 +860,9 @@ foreach ($tour_members as $member) {
                                             <i class="fas fa-crown me-1"></i>Admin Member (Confirmed)
                                         </span>
                                     <?php else: ?>
-                                        <span class="badge bg-success">
-                                            <i class="fas fa-check me-1"></i>Member (<?php echo ucfirst($user_member_status); ?>)
-                                        </span>
+                                    <span class="badge bg-success">
+                                        <i class="fas fa-check me-1"></i>Member (<?php echo ucfirst($user_member_status); ?>)
+                                    </span>
                                     <?php endif; ?>
                                 <?php else: ?>
                                     <span class="text-muted">Not a member</span>
@@ -326,11 +880,11 @@ foreach ($tour_members as $member) {
                                                 </button>
                                             </form>
                                         <?php } else { ?>
-                                            <form method="POST" style="display: inline;">
-                                                <button type="submit" name="join_tour" class="btn btn-success">
-                                                    <i class="fas fa-paper-plane me-2"></i>Send Join Request
-                                                </button>
-                                            </form>
+                                        <form method="POST" style="display: inline;">
+                                            <button type="submit" name="join_tour" class="btn btn-success">
+                                                <i class="fas fa-paper-plane me-2"></i>Send Join Request
+                                            </button>
+                                        </form>
                                         <?php }
                                     } else { ?>
                                         <span class="text-muted"><?php echo $joinCheck['reason']; ?></span>
@@ -384,9 +938,9 @@ foreach ($tour_members as $member) {
                                                         <i class="fas fa-crown me-1"></i>Admin (Confirmed)
                                                     </span>
                                                 <?php else: ?>
-                                                    <span class="badge bg-<?php echo $member['status'] == 'confirmed' ? 'success' : ($member['status'] == 'pending' ? 'warning' : 'danger'); ?>">
-                                                        <?php echo ucfirst($member['status']); ?>
-                                                    </span>
+                                                <span class="badge bg-<?php echo $member['status'] == 'confirmed' ? 'success' : ($member['status'] == 'pending' ? 'warning' : 'danger'); ?>">
+                                                    <?php echo ucfirst($member['status']); ?>
+                                                </span>
                                                 <?php endif; ?>
                                             </td>
                                             <td>
@@ -581,9 +1135,9 @@ foreach ($tour_members as $member) {
                     <div class="card-body">
                         <div class="d-grid gap-2">
                             <?php if ($tour['status'] == 'active' || $tour['status'] == 'completed'): ?>
-                                <a href="edit_tour.php?id=<?php echo $tour_id; ?>" class="btn btn-warning btn-sm">
-                                    <i class="fas fa-edit me-2"></i>Edit Tour
-                                </a>
+                            <a href="edit_tour.php?id=<?php echo $tour_id; ?>" class="btn btn-warning btn-sm">
+                                <i class="fas fa-edit me-2"></i>Edit Tour
+                            </a>
                                 <form method="POST" style="display: inline;">
                                     <button type="submit" name="delete_tour" class="btn btn-danger btn-sm w-100" 
                                             onclick="return confirm('Are you sure you want to delete this tour? This action cannot be undone.')">

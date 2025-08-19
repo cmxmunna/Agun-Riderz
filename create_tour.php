@@ -1,23 +1,76 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-requireAdmin();
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
+// Check if user is admin
+if ($_SESSION['user_role'] !== 'admin') {
+    header('Location: index.php');
+    exit();
+}
+
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Create tour function
+function createTour($data) {
+    $pdo = getDBConnection();
+    
+    $stmt = $pdo->prepare("
+        INSERT INTO tours (title, description, destination, start_date, end_date, budget, max_members, created_by) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+    
+    return $stmt->execute([
+        $data['title'],
+        $data['description'],
+        $data['destination'],
+        $data['start_date'],
+        $data['end_date'],
+        $data['budget'],
+        $data['max_members'],
+        $data['created_by']
+    ]);
+}
+
+// Sanitize input function
+function sanitizeInput($input) {
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+// Controller logic starts here
 $user_id = $_SESSION['user_id'];
+$user = getUserById($user_id);
+$user_role = $user['role'];
+
 $error = '';
 $success = '';
 
-if ($_POST) {
-    $title = sanitizeInput($_POST['title']);
-    $description = sanitizeInput($_POST['description']);
-    $destination = sanitizeInput($_POST['destination']);
-    $start_date = $_POST['start_date'];
-    $end_date = $_POST['end_date'];
-    $budget = (float)$_POST['budget'];
-    $max_members = (int)$_POST['max_members'];
-    $status = $_POST['status'];
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Validate and sanitize input
+    $title = sanitizeInput($_POST['title'] ?? '');
+    $description = sanitizeInput($_POST['description'] ?? '');
+    $destination = sanitizeInput($_POST['destination'] ?? '');
+    $start_date = $_POST['start_date'] ?? '';
+    $end_date = $_POST['end_date'] ?? '';
+    $budget = (float)($_POST['budget'] ?? 0);
+    $max_members = (int)($_POST['max_members'] ?? 1);
     
+    // Validation
     if (empty($title) || empty($destination) || empty($start_date) || empty($end_date)) {
         $error = 'Please fill in all required fields.';
     } elseif ($start_date >= $end_date) {
@@ -27,6 +80,7 @@ if ($_POST) {
     } elseif ($max_members < 1) {
         $error = 'Maximum members must be at least 1.';
     } else {
+        // Create tour data array
         $tour_data = [
             'title' => $title,
             'description' => $description,
@@ -38,6 +92,7 @@ if ($_POST) {
             'created_by' => $user_id
         ];
         
+        // Attempt to create tour
         if (createTour($tour_data)) {
             $success = 'Tour created successfully!';
             // Clear form data

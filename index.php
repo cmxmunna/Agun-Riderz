@@ -1,7 +1,7 @@
 <?php
+ob_start();
 session_start();
 require_once 'config/database.php';
-require_once 'includes/functions.php';
 
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
@@ -9,15 +9,126 @@ if (!isset($_SESSION['user_id'])) {
     exit();
 }
 
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Get upcoming tours
+function getUpcomingTours() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT t.*, u.name as creator_name,
+               (SELECT COUNT(*) FROM tour_members WHERE tour_id = t.id AND status = 'confirmed') as member_count
+        FROM tours t 
+        LEFT JOIN users u ON t.created_by = u.id 
+        WHERE t.start_date >= CURDATE() AND t.status = 'active'
+        ORDER BY t.start_date ASC
+        LIMIT 6
+    ");
+    $stmt->execute();
+    return $stmt->fetchAll();
+}
+
+// Get user tours
+function getUserTours($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT t.*, tm.status as member_status, u.name as creator_name
+        FROM tours t 
+        INNER JOIN tour_members tm ON t.id = tm.tour_id
+        LEFT JOIN users u ON t.created_by = u.id 
+        WHERE tm.user_id = ?
+        ORDER BY t.start_date DESC
+    ");
+    $stmt->execute([$user_id]);
+    return $stmt->fetchAll();
+}
+
+// Get recent expenses
+function getRecentExpenses($limit = 5) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT e.*, u.name as user_name, t.title as tour_title
+        FROM expenses e 
+        LEFT JOIN users u ON e.user_id = u.id 
+        LEFT JOIN tours t ON e.tour_id = t.id 
+        ORDER BY e.date DESC
+        LIMIT ?
+    ");
+    $stmt->execute([$limit]);
+    return $stmt->fetchAll();
+}
+
+// Get user total expenses
+function getUserTotalExpenses($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT SUM(amount) as total 
+        FROM expenses 
+        WHERE user_id = ? AND status = 'approved'
+    ");
+    $stmt->execute([$user_id]);
+    $result = $stmt->fetch();
+    return $result['total'] ?? 0;
+}
+
+// Get total members count
+function getTotalMembers() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->query("SELECT COUNT(*) as count FROM users WHERE role = 'member'");
+    $result = $stmt->fetch();
+    return $result['count'];
+}
+
+// Get total tours count
+function getTotalTours() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->query("SELECT COUNT(*) as count FROM tours");
+    $result = $stmt->fetch();
+    return $result['count'];
+}
+
+// Get total expenses count
+function getTotalExpenses() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->query("SELECT COUNT(*) as count FROM expenses");
+    $result = $stmt->fetch();
+    return $result['count'];
+}
+
+// Format date function
+function formatDate($date) {
+    return date('M d, Y', strtotime($date));
+}
+
+// Format currency function
+function formatCurrency($amount) {
+    return '৳' . number_format($amount, 2);
+}
+
+// Controller logic starts here
 $user_id = $_SESSION['user_id'];
 $user = getUserById($user_id);
 $user_role = $user['role'];
 
-// Get upcoming tours
+// Get dashboard data
 $upcoming_tours = getUpcomingTours();
 $user_tours = getUserTours($user_id);
-$recent_expenses = getRecentExpenses();
-$announcements = getAnnouncements();
+$recent_expenses = getRecentExpenses(5);
+$user_total_expenses = getUserTotalExpenses($user_id);
+
+// Get statistics for admin
+if ($user_role == 'admin') {
+    $total_members = getTotalMembers();
+    $total_tours = getTotalTours();
+    $total_expenses = getTotalExpenses();
+}
 ?>
 
 <!DOCTYPE html>
@@ -115,7 +226,7 @@ $announcements = getAnnouncements();
                 <div class="card text-center">
                     <div class="card-body">
                         <i class="fas fa-money-bill-wave fa-2x text-warning mb-2"></i>
-                        <h5 class="card-title">৳<?php echo number_format(getUserTotalExpenses($user_id)); ?></h5>
+                        <h5 class="card-title">৳<?php echo number_format($user_total_expenses); ?></h5>
                         <p class="card-text">Total Expenses</p>
                     </div>
                 </div>

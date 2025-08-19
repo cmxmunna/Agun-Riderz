@@ -1,7 +1,11 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
 
-// Logout the user
-logout();
+// Destroy the session
+session_destroy();
+
+// Redirect to login page
+header('Location: login.php');
+exit();
 ?> 

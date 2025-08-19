@@ -1,55 +1,138 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-requireAdmin();
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
+// Check if user is admin
+if ($_SESSION['user_role'] !== 'admin') {
+    header('Location: index.php');
+    exit();
+}
+
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Get all users
+function getAllUsers() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->query("SELECT * FROM users ORDER BY created_at DESC");
+    return $stmt->fetchAll();
+}
+
+// Get total members count
+function getTotalMembers() {
+    $pdo = getDBConnection();
+    $stmt = $pdo->query("SELECT COUNT(*) as count FROM users WHERE role = 'member'");
+    $result = $stmt->fetch();
+    return $result['count'];
+}
+
+// Update user function
+function updateUser($user_id, $data) {
+    $pdo = getDBConnection();
+    
+    $fields = [];
+    $values = [];
+    
+    foreach ($data as $key => $value) {
+        if ($key !== 'id') {
+            $fields[] = "$key = ?";
+            $values[] = $value;
+        }
+    }
+    
+    $values[] = $user_id;
+    
+    $sql = "UPDATE users SET " . implode(', ', $fields) . " WHERE id = ?";
+    $stmt = $pdo->prepare($sql);
+    
+    return $stmt->execute($values);
+}
+
+// Delete user function
+function deleteUser($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("DELETE FROM users WHERE id = ?");
+    return $stmt->execute([$user_id]);
+}
+
+// Sanitize input function
+function sanitizeInput($input) {
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+// Format date function
+function formatDate($date) {
+    return date('M d, Y', strtotime($date));
+}
+
+// Controller logic starts here
 $user_id = $_SESSION['user_id'];
+$user = getUserById($user_id);
+$user_role = $user['role'];
+
 $error = '';
 $success = '';
 
-// Handle member actions
-if ($_POST) {
-    if (isset($_POST['delete_member'])) {
-        $member_id = (int)$_POST['member_id'];
-        if ($member_id != $user_id) { // Prevent admin from deleting themselves
-            if (deleteUser($member_id)) {
-                $success = 'Member deleted successfully.';
-            } else {
-                $error = 'Failed to delete member.';
-            }
-        } else {
-            $error = 'You cannot delete your own account.';
-        }
-    } elseif (isset($_POST['change_role'])) {
-        $member_id = (int)$_POST['member_id'];
-        $new_role = $_POST['new_role'];
+// Handle user actions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['update_user'])) {
+        $update_user_id = (int)($_POST['user_id'] ?? 0);
+        $name = sanitizeInput($_POST['name'] ?? '');
+        $email = sanitizeInput($_POST['email'] ?? '');
+        $phone = sanitizeInput($_POST['phone'] ?? '');
+        $role = $_POST['role'] ?? 'member';
         
-        if ($member_id != $user_id) { // Prevent admin from changing their own role
-            if (updateUser($member_id, ['role' => $new_role])) {
-                $success = 'Member role updated successfully.';
-            } else {
-                $error = 'Failed to update member role.';
-            }
+        if (empty($name) || empty($email)) {
+            $error = 'Name and email are required fields.';
         } else {
-            $error = 'You cannot change your own role.';
+            $user_data = [
+                'name' => $name,
+                'email' => $email,
+                'phone' => $phone,
+                'role' => $role
+            ];
+            
+            if (updateUser($update_user_id, $user_data)) {
+                $success = 'User updated successfully!';
+            } else {
+                $error = 'Failed to update user. Please try again.';
+            }
+        }
+    } elseif (isset($_POST['delete_user'])) {
+        $delete_user_id = (int)($_POST['user_id'] ?? 0);
+        
+        // Prevent admin from deleting themselves
+        if ($delete_user_id == $user_id) {
+            $error = 'You cannot delete your own account.';
+        } else {
+            if (deleteUser($delete_user_id)) {
+                $success = 'User deleted successfully!';
+            } else {
+                $error = 'Failed to delete user. Please try again.';
+            }
         }
     }
 }
 
-// Get all members
-$members = getAllUsers();
-$total_members = count($members);
-$admin_count = 0;
-$member_count = 0;
+// Get all users
+$users = getAllUsers();
 
-foreach ($members as $member) {
-    if ($member['role'] == 'admin') {
-        $admin_count++;
-    } else {
-        $member_count++;
-    }
-}
+// Get total members count
+$total_members = getTotalMembers();
 ?>
 
 <!DOCTYPE html>

@@ -1,71 +1,127 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-// Redirect if already logged in
-if (isLoggedIn()) {
+// Check if user is already logged in
+if (isset($_SESSION['user_id'])) {
     header('Location: index.php');
     exit();
 }
 
+
+
+// Get user by email
+function getUserByEmail($email) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ?");
+    $stmt->execute([$email]);
+    return $stmt->fetch();
+}
+
+// Get user by phone
+function getUserByPhone($phone) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE phone = ?");
+    $stmt->execute([$phone]);
+    return $stmt->fetch();
+}
+
+// Create user function
+function createUser($name, $email, $phone, $password = null, $facebook_id = null) {
+    $pdo = getDBConnection();
+    
+    $hashed_password = $password ? password_hash($password, PASSWORD_DEFAULT) : null;
+    
+    $stmt = $pdo->prepare("
+        INSERT INTO users (name, email, phone, password, facebook_id, role) 
+        VALUES (?, ?, ?, ?, ?, 'member')
+    ");
+    
+    return $stmt->execute([$name, $email, $phone, $hashed_password, $facebook_id]);
+}
+
+// Validate email function
+function validateEmail($email) {
+    return filter_var($email, FILTER_VALIDATE_EMAIL);
+}
+
+// Validate phone function
+function validatePhone($phone) {
+    return preg_match('/^(\+880|880|0)?1[3456789]\d{8}$/', $phone);
+}
+
+// Sanitize input function
+function sanitizeInput($input) {
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+// Controller logic starts here
 $error = '';
 $success = '';
 
-// Handle login form submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['register'])) {
-    $identifier = sanitizeInput($_POST['identifier'] ?? ''); // email or phone
-    $password = $_POST['password'] ?? '';
-    
-    if (empty($identifier) || empty($password)) {
-        $error = 'Please fill in all fields';
-    } else {
-        // Try login with email first
-        if (validateEmail($identifier)) {
-            if (loginUser($identifier, $password)) {
-                header('Location: index.php');
-                exit();
-            }
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['login'])) {
+        // Handle login
+        $email = sanitizeInput($_POST['email'] ?? '');
+        $password = $_POST['password'] ?? '';
+        
+        if (empty($email) || empty($password)) {
+            $error = 'Please enter both email and password.';
         } else {
-            // Try login with phone
-            if (loginWithPhone($identifier, $password)) {
+            $user = getUserByEmail($email);
+            
+            if ($user && password_verify($password, $user['password'])) {
+                // Login successful
+                $_SESSION['user_id'] = $user['id'];
+                $_SESSION['user_role'] = $user['role'];
+                
                 header('Location: index.php');
                 exit();
+            } else {
+                $error = 'Invalid email or password.';
             }
         }
+    } elseif (isset($_POST['register'])) {
+        // Handle registration
+        $name = sanitizeInput($_POST['name'] ?? '');
+        $email = sanitizeInput($_POST['email'] ?? '');
+        $phone = sanitizeInput($_POST['phone'] ?? '');
+        $password = $_POST['password'] ?? '';
+        $confirm_password = $_POST['confirm_password'] ?? '';
         
-        $error = 'Invalid credentials';
-    }
-}
-
-// Handle registration form submission
-if (isset($_POST['register'])) {
-    $name = sanitizeInput($_POST['name'] ?? '');
-    $email = sanitizeInput($_POST['email'] ?? '');
-    $phone = sanitizeInput($_POST['phone'] ?? '');
-    $password = $_POST['password'] ?? '';
-    $confirm_password = $_POST['confirm_password'] ?? '';
-    
-    if (empty($name) || empty($email) || empty($phone) || empty($password)) {
-        $error = 'Please fill in all fields';
-    } elseif (!validateEmail($email)) {
-        $error = 'Please enter a valid email address';
-    } elseif (!validatePhone($phone)) {
-        $error = 'Please enter a valid phone number';
-    } elseif ($password !== $confirm_password) {
-        $error = 'Passwords do not match';
-    } elseif (strlen($password) < 6) {
-        $error = 'Password must be at least 6 characters long';
-    } else {
-        // Check if user already exists
-        if (getUserByEmail($email)) {
-            $error = 'Email already registered';
-        } elseif (getUserByPhone($phone)) {
-            $error = 'Phone number already registered';
+        // Validation
+        if (empty($name) || empty($email) || empty($phone) || empty($password)) {
+            $error = 'Please fill in all required fields.';
+        } elseif (!validateEmail($email)) {
+            $error = 'Please enter a valid email address.';
+        } elseif (!validatePhone($phone)) {
+            $error = 'Please enter a valid phone number.';
+        } elseif (strlen($password) < 6) {
+            $error = 'Password must be at least 6 characters long.';
+        } elseif ($password !== $confirm_password) {
+            $error = 'Passwords do not match.';
         } else {
-            if (createUser($name, $email, $phone, $password)) {
-                $success = 'Registration successful! Please login.';
+            // Check if email already exists
+            $existing_user = getUserByEmail($email);
+            if ($existing_user) {
+                $error = 'Email is already registered. Please use a different email or login.';
             } else {
-                $error = 'Registration failed. Please try again.';
+                // Check if phone already exists
+                $existing_phone = getUserByPhone($phone);
+                if ($existing_phone) {
+                    $error = 'Phone number is already registered. Please use a different phone number.';
+                } else {
+                    // Create user
+                    if (createUser($name, $email, $phone, $password)) {
+                        $success = 'Registration successful! Please login with your credentials.';
+                        // Clear form data
+                        $_POST = array();
+                    } else {
+                        $error = 'Registration failed. Please try again.';
+                    }
+                }
             }
         }
     }

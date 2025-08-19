@@ -1,11 +1,75 @@
 <?php
+ob_start();
 session_start();
-require_once 'includes/functions.php';
+require_once 'config/database.php';
 
-requireAdmin();
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
+// Check if user is admin
+if ($_SESSION['user_role'] !== 'admin') {
+    header('Location: index.php');
+    exit();
+}
+
+
+
+// Get user by ID
+function getUserById($user_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch();
+}
+
+// Get tour by ID
+function getTourById($tour_id) {
+    $pdo = getDBConnection();
+    $stmt = $pdo->prepare("
+        SELECT t.*, u.name as creator_name, 
+               (SELECT COUNT(*) FROM tour_members WHERE tour_id = t.id AND status = 'confirmed') as member_count
+        FROM tours t 
+        LEFT JOIN users u ON t.created_by = u.id 
+        WHERE t.id = ?
+    ");
+    $stmt->execute([$tour_id]);
+    return $stmt->fetch();
+}
+
+// Update tour function
+function updateTour($tour_id, $data) {
+    $pdo = getDBConnection();
+    
+    $fields = [];
+    $values = [];
+    
+    foreach ($data as $key => $value) {
+        if ($key !== 'id') {
+            $fields[] = "$key = ?";
+            $values[] = $value;
+        }
+    }
+    
+    $values[] = $tour_id;
+    
+    $sql = "UPDATE tours SET " . implode(', ', $fields) . " WHERE id = ?";
+    $stmt = $pdo->prepare($sql);
+    
+    return $stmt->execute($values);
+}
+
+// Sanitize input function
+function sanitizeInput($input) {
+    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+}
+
+// Controller logic starts here
 $user_id = $_SESSION['user_id'];
 $user = getUserById($user_id);
+$user_role = $user['role'];
 
 $error = '';
 $success = '';
@@ -27,54 +91,53 @@ if (!$tour) {
     exit();
 }
 
+// Check if user is the creator or admin
+if ($tour['created_by'] != $user_id && $user_role !== 'admin') {
+    header('Location: tours.php');
+    exit();
+}
+
 // Handle form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Validate and sanitize input
     $title = sanitizeInput($_POST['title'] ?? '');
     $description = sanitizeInput($_POST['description'] ?? '');
     $destination = sanitizeInput($_POST['destination'] ?? '');
     $start_date = $_POST['start_date'] ?? '';
     $end_date = $_POST['end_date'] ?? '';
     $budget = (float)($_POST['budget'] ?? 0);
-    $max_members = (int)($_POST['max_members'] ?? 20);
-    $status = sanitizeInput($_POST['status'] ?? 'draft');
-
+    $max_members = (int)($_POST['max_members'] ?? 1);
+    $status = $_POST['status'] ?? 'active';
+    
     // Validation
     if (empty($title) || empty($destination) || empty($start_date) || empty($end_date)) {
-        $error = 'Please fill in all required fields';
-    } elseif (strlen($title) > 200) {
-        $error = 'Title must be less than 200 characters';
-    } elseif (strlen($destination) > 200) {
-        $error = 'Destination must be less than 200 characters';
-    } elseif ($budget < 0) {
-        $error = 'Budget cannot be negative';
-    } elseif ($max_members < 1 || $max_members > 100) {
-        $error = 'Maximum members must be between 1 and 100';
+        $error = 'Please fill in all required fields.';
     } elseif ($start_date >= $end_date) {
-        $error = 'End date must be after start date';
-    } elseif (!in_array($status, ['draft', 'active', 'completed', 'cancelled'])) {
-        $error = 'Invalid status selected';
+        $error = 'End date must be after start date.';
+    } elseif ($budget < 0) {
+        $error = 'Budget cannot be negative.';
+    } elseif ($max_members < 1) {
+        $error = 'Maximum members must be at least 1.';
     } else {
-        // Check if tour has confirmed members and trying to reduce max_members
-        if ($max_members < $tour['member_count']) {
-            $error = 'Cannot reduce maximum members below current confirmed members (' . $tour['member_count'] . ')';
+        // Create tour data array
+        $tour_data = [
+            'title' => $title,
+            'description' => $description,
+            'destination' => $destination,
+            'start_date' => $start_date,
+            'end_date' => $end_date,
+            'budget' => $budget,
+            'max_members' => $max_members,
+            'status' => $status
+        ];
+        
+        // Attempt to update tour
+        if (updateTour($tour_id, $tour_data)) {
+            $success = 'Tour updated successfully!';
+            // Refresh tour data
+            $tour = getTourById($tour_id);
         } else {
-            $updateData = [
-                'title' => $title,
-                'description' => $description,
-                'destination' => $destination,
-                'start_date' => $start_date,
-                'end_date' => $end_date,
-                'budget' => $budget,
-                'max_members' => $max_members,
-                'status' => $status
-            ];
-
-            if (updateTour($tour_id, $updateData)) {
-                $success = 'Tour updated successfully!';
-                $tour = getTourById($tour_id); // Refresh data
-            } else {
-                $error = 'Failed to update tour. Please try again.';
-            }
+            $error = 'Failed to update tour. Please try again.';
         }
     }
 }
